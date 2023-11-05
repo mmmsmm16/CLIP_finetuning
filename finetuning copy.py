@@ -10,7 +10,7 @@ from PIL import Image
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 # from torchinfo import summary
- 
+
 # コマンドライン引数のパース
 def parse_args():
     parser = argparse.ArgumentParser(description='Finetune CLIP with custom settings')
