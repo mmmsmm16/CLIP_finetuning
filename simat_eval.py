@@ -18,7 +18,7 @@ def simat_eval1(args):
 
     emb_key = 'clip'
     output = {}
- 
+
     transfos = pd.read_csv('simat_db/transfos.csv', index_col=0)
     triplets = pd.read_csv('simat_db/triplets.csv', index_col=0)
     did2rid = dict(zip(triplets.dataset_id, triplets.index))
@@ -65,9 +65,9 @@ def simat_eval2(args):
     triplets = pd.read_csv('simat_db/triplets.csv', index_col=0)
     did2rid = dict(zip(triplets.dataset_id, triplets.index))
     rid2did = dict(zip(triplets.index, triplets.dataset_id))
-    
+
     transfos = transfos[transfos.is_test == (args.domain == 'test')]
-    
+
     transfos_did = [rid2did[rid] for rid in transfos.region_id]
 
     #new method
@@ -89,10 +89,10 @@ def simat_eval2(args):
 
         nnb = (target_embs @ img_embs_stacked.T).topk(5).indices
         nnb_notself = [r[0] if r[0].item() != t else r[1] for r, t in zip(nnb, transfos_did)]
-        
+
         scores = np.array([oscar_scores[ri, tc] for ri, tc in zip(nnb_notself, transfos.target_ids)]) > .5
 
-        
+
         output[lbd] = 100*np.average(scores, weights=weights)
     return output
 
@@ -105,7 +105,7 @@ if __name__ == '__main__':
     parser.add_argument('--lbds', nargs='+', default=[1], help='list of values for lambda')
     args = parser.parse_args()
     args.lbds = [float(l) for l in args.lbds]
-    
+
     output1 = simat_eval1(args)
     output2 = simat_eval2(args)
     print('SIMAT Scores (Original CLIP):')
