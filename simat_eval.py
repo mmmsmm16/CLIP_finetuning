@@ -13,35 +13,48 @@ torch.Tensor.normalize = lambda x: x/x.norm(dim=-1, keepdim=True)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 def simat_eval1(args):
-    model, preprocess = clip.load("ViT-B/32", device=device)
-    model.load_state_dict(torch.load("/home/tsuneda/copy/CLIP_finetuning/models/finetuned_clip_model_5_128.pth"))
-
     emb_key = 'clip'
     output = {}
-
+    # transfosとtripletsの読み込み
     transfos = pd.read_csv('simat_db/transfos.csv', index_col=0)
     triplets = pd.read_csv('simat_db/triplets.csv', index_col=0)
+    # dataset_idとregion_idの対応を辞書に格納
     did2rid = dict(zip(triplets.dataset_id, triplets.index))
     rid2did = dict(zip(triplets.index, triplets.dataset_id))
-
+    # transfosがtestかdevかを判定
+    # testの場合はis_testがTrueのもののみを抽出
+    # devの場合はis_testがFalseのもののみを抽出
     transfos = transfos[transfos.is_test == (args.domain == 'test')]
-
+    # transfosのregion_idをdataset_idに変換
     transfos_did = [rid2did[rid] for rid in transfos.region_id]
 
-    #new method
+    #clip_simatを読み込み
     clip_simat = torch.load('data/simat_img_clip.pt')
+    # clip_simatをstackして正規化
+    # stack: https://deepage.net/features/numpy-stack.html
     img_embs_stacked = torch.stack([clip_simat[did2rid[i]] for i in range(len(clip_simat))]).float().normalize()
+    # value_embsを作成
+    # value_embs: transfosのregion_idに対応するclip_simatの値をstackしたもの
     value_embs = torch.stack([img_embs_stacked[did] for did in transfos_did])
 
+    # word_embsを読み込み
+    # word_embs: word2vecの辞書
     word_embs = dict(torch.load(f'data/simat_words_{emb_key}.ptd'))
+    # word_embsを正規化
     w2v = {k: v.float().normalize() for k, v in word_embs.items()}
     # w2v = {k:model.encode_text(v).normalize() for k, v in word_embs.items()}
+    # delta_vectorsを作成
     delta_vectors = torch.stack([w2v[x.target] - w2v[x.value] for i, x in transfos.iterrows()])
 
+    # oscar_scoresを読み込み
     oscar_scores = torch.load('simat_db/oscar_similarity_matrix.pt')
+    # weightsを作成
+    # weights: 1/√norm2
+    # norm2: transfosのnorm2
     weights = 1/np.array(transfos.norm2)**.5
     weights = weights/sum(weights)
 
+    # lambdaを変えながら評価
     for lbd in args.lbds:
         target_embs = value_embs + lbd*delta_vectors
 
@@ -55,9 +68,6 @@ def simat_eval1(args):
     return output
 
 def simat_eval2(args):
-    model, preprocess = clip.load("ViT-B/32", device=device)
-    model.load_state_dict(torch.load("/home/tsuneda/copy/CLIP_finetuning/models/finetuned_clip_model_5_128.pth"))
-
     emb_key = 'clip'
     output = {}
 
