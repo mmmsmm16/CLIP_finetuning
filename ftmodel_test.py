@@ -15,23 +15,26 @@ import numpy as np
 import torch
 import matplotlib.pyplot as plt
 from sklearn.decomposition import PCA
+from matplotlib import colors, cm
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--load_model", type=str, default="set1", help="load model")
+    parser.add_argument("--lm", type=str, default="set1", help="load model")
     args = parser.parse_args()
     return args
 # メイン関数
 def main():
     args = parse_args()
-    ftmodel_path = f"/home/tsuneda/copy/CLIP_finetuning/output/{args.load_model}/models/finetuned_clip_model_5_128.pth"
-    output_path = f"./output/{args.load_model}/test"
+    ftmodel_path = f"/home/tsuneda/data_dl/CLIP_finetuning/output/{args.lm}/models/finetuned_clip_model_5_128.pth"
+    # checkpoint = f"/home/tsuneda/data_dl/CLIP_finetuning/output/checkpoint_epoch_3.pth"
+    output_path = f"./output/{args.lm}/test"
     os.makedirs(output_path, exist_ok=True)
     model, preprocess = load_ftmodel(ftmodel_path, "cuda")
+    # model, preprocess = load_checkpoint(torch.load(checkpoint), "cuda")
     original_images, images, texts = create_test_image(preprocess)
     image_features, text_features, similarity = compute_similarity(model, images, texts)
-    print(f"image_features:", image_features.shape)
-    print(f"text_features:", text_features.shape)
+    # print(f"image_features:", image_features.shape)
+    # print(f"text_features:", text_features.shape)
     visualize_embedding_space(image_features, text_features, output_path)
     visualize_similarity(original_images, texts, similarity, output_path)
 
@@ -39,6 +42,12 @@ def main():
 def load_ftmodel(model_path, device):
     model, preprocess = clip.load("ViT-B/32", device=device)
     model.load_state_dict(torch.load(model_path))
+    return model, preprocess
+
+# チェックポイントのモデルをロードする関数
+def load_checkpoint(checkpoint, device):
+    model, preprocess = clip.load("ViT-B/32", device=device)
+    model.load_state_dict(checkpoint['model_state_dict'])
     return model, preprocess
 
 # テストテキストの作成
@@ -92,41 +101,71 @@ def visualize_embedding_space(image_features, text_features, output_path):
     image_vis_data = vis_data[:len(image_features)]
     text_vis_data = vis_data[len(image_features):]
 
-    plt.figure(figsize=(10, 10))
-    plt.title("Image and Text Embeddings Aligned with PCA")
-    plt.scatter(image_vis_data[:, 0], image_vis_data[:, 1], c="r")
-    plt.scatter(text_vis_data[:, 0], text_vis_data[:, 1], c="b")
+    fig, ax = plt.subplots(figsize=(10, 10))
+    ax.set_title("Image and Text Embeddings Aligned with PCA")
+
+    # 寄与率を取得
+    explained_variances = pca.explained_variance_ratio_
+    variance_explained = f"PC1: {explained_variances[0]:.2f}, PC2: {explained_variances[1]:.2f}"
+
+    # 寄与率をサブタイトルに追加
+    ax.set_xlabel(f"Principal Component 1 ({explained_variances[0]:.2%} variance)")
+    ax.set_ylabel(f"Principal Component 2 ({explained_variances[1]:.2%} variance)")
+
+    ax.scatter(image_vis_data[:, 0], image_vis_data[:, 1], c="r", label='Image Features')
+    ax.scatter(text_vis_data[:, 0], text_vis_data[:, 1], c="b", label='Text Features')
+
     for i, (x, y) in enumerate(image_vis_data):
-        plt.annotate(i, (x, y))
+        ax.annotate(i, (x, y))
 
     for i, (x, y) in enumerate(text_vis_data):
-        plt.annotate(i, (x, y))
+        ax.annotate(i, (x, y))
+
+    # 凡例を追加
+    ax.legend()
+
+    # 寄与率を表示
+    plt.figtext(0.5, 0.01, variance_explained, ha="center", fontsize=10)
 
     # 画像を保存する
     plt.savefig(f"{output_path}/embedding_space.png")
+    plt.close(fig)  # ファイル保存後に図を閉じる
 
 # コサイン類似度を可視化する関数
 def visualize_similarity(original_images, texts, similarity, output_path):
     count = len(texts)
-    plt.figure(figsize=(20, 14))
-    plt.imshow(similarity, vmin=0.1, vmax=0.3)
-    # plt.colorbar()
-    plt.yticks(range(count), texts, fontsize=18)
-    plt.xticks([])
-    for i, image in enumerate(original_images):
-        plt.imshow(image, extent=(i - 0.5, i + 0.5, -1.6, -0.6), origin="lower")
+    fig, ax = plt.subplots(figsize=(20, 14))
+
+    # カラーマップとして 'jet' を使用し、コントラストを高める
+    cmap = cm.jet
+    norm = colors.Normalize(vmin=0, vmax=1)
+
     for x in range(similarity.shape[1]):
         for y in range(similarity.shape[0]):
-            plt.text(x, y, f"{similarity[y, x]:.2f}", ha="center", va="center", size=12)
+            ax.add_patch(plt.Rectangle((x-0.5, y-0.5), 1, 1, color=cmap(norm(similarity[y, x]))))
+
+    sm = cm.ScalarMappable(cmap=cmap, norm=norm)
+    sm.set_array([])
+    cbar = fig.colorbar(sm, ax=ax)
+
+    ax.set_yticks(range(count))
+    ax.set_yticklabels(texts, fontsize=18)
+    ax.set_xticks([])
+    for i, image in enumerate(original_images):
+        ax.imshow(image, extent=(i - 0.5, i + 0.5, -1.6, -0.6), origin="lower")
+    for x in range(similarity.shape[1]):
+        for y in range(similarity.shape[0]):
+            ax.text(x, y, f"{similarity[y, x]:.2f}", ha="center", va="center", size=12)
 
     for side in ["left", "top", "right", "bottom"]:
-        plt.gca().spines[side].set_visible(False)
+        ax.spines[side].set_visible(False)
 
-    plt.xlim([-0.5, count - 0.5])
-    plt.ylim([count + 0.5, -2])
+    ax.set_xlim([-0.5, count - 0.5])
+    ax.set_ylim([count + 0.5, -2])
 
-    plt.title("Cosine similarity between text and image features", size=20)
+    ax.set_title("Cosine similarity between text and image features", size=20)
     plt.savefig(f"{output_path}/similarity.png")
+    plt.close()  # ファイル保存後に図を閉じる
 
 # メイン関数の実行
 if __name__ == "__main__":
