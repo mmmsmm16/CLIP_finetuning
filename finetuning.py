@@ -245,7 +245,7 @@ def training_loop(num_epoch, batch_size, train_loader, val_loader, model, optimi
             log_msg = f"epoch: {epoch+1}, loss: {loss.item():.4f}, val_loss: {val_loss:.4f}\n"
             print(log_msg)
             log_file.write(log_msg)
-            save_checkpoint(model, optimizer, loss_list, val_loss_list, epoch, batch_size, model_save_path)
+            save_checkpoint(model, optimizer, loss_list, val_loss_list, epoch, model_save_path)
 
     return loss_list, val_loss_list
 
@@ -263,6 +263,7 @@ def freeze_text_params(model):
     model.positional_embedding.requires_grad = False
     # text_projection層を固定
     model.text_projection.requires_grad = False
+    print("Text parameters are frozen")
 
 # 学習済みモデルの保存
 def save_model(model, save_dir):
@@ -317,8 +318,7 @@ def main():
     if config['freeze_text_params']:
         # テキストエンコーダの重みを固定
         freeze_text_params(model)
-        print("Text parameters are frozen")
-
+  
     # 学習ループ
     loss_list, val_loss_list = training_loop(num_epoch, batch_size, train_loader, val_loader, model, optimizer, criterion, log_file_path, model_save_path)
 
