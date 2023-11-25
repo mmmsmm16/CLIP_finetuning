@@ -4,19 +4,20 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import clip
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, Subset
 import pandas as pd
 from PIL import Image
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 import yaml
 import torch.nn.functional as F
-import re
+import random
 # from torchinfo import summary
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Finetune CLIP with custom settings')
     parser.add_argument('--set', type=str, required=True, help='name of the Experiment setting')
+    parser.add_argument('--test', action='store_true', help='test mode')
     
     args = parser.parse_args()
     return args
@@ -83,31 +84,50 @@ class ClipLoss(nn.Module):
         loss1 = F.cross_entropy(mma, labels)
         loss2 = F.cross_entropy(mma.T, labels)
         loss = (loss1 + loss2)/2.0
-
         return loss
     
 # Delta損失関数クラスの定義
 class DeltaLoss(nn.Module):
     def __init__(self):
         super(DeltaLoss, self).__init__()
-        self.clip_loss = ClipLoss()
 
     def forward(self, txtf, imgf):
         # モダリティ内の差分ベクトルの計算
+        device = txtf.device
         n, _ = txtf.size()
         txt_delta_vectors = []
         img_delta_vectors = []
 
-        for i in range(n):
-            for j in range(i+1, n):
-                txt_delta_vectors.append(txtf[i] - txtf[j])
-                img_delta_vectors.append(imgf[i] - imgf[j])
+        # デルタベクトルの計算
+        txt_delta_vectors = [(txtf[i] - txtf[j]).div((txtf[i] - txtf[j]).norm(2, dim=-1, keepdim=True) + 1e-8) 
+                            for i in range(n) for j in range(n) if i != j]
+        img_delta_vectors = [(imgf[i] - imgf[j]).div((imgf[i] - imgf[j]).norm(2, dim=-1, keepdim=True) + 1e-8) 
+                            for i in range(n) for j in range(n) if i != j]
 
-        txt_delta_vectors = torch.stack(txt_delta_vectors)
-        img_delta_vectors = torch.stack(img_delta_vectors)
+        # NaNを含む要素のインデックスを特定
+        nan_indices = set()
+        for idx, (txt_vec, img_vec) in enumerate(zip(txt_delta_vectors, img_delta_vectors)):
+            if torch.isnan(txt_vec).any() or torch.isnan(img_vec).any():
+                nan_indices.add(idx)
 
-        # クリップ損失の計算
-        loss = self.clip_loss(txt_delta_vectors, img_delta_vectors)
+        # NaNを含む要素を削除
+        txt_delta_vectors = [vec for idx, vec in enumerate(txt_delta_vectors) if idx not in nan_indices]
+        img_delta_vectors = [vec for idx, vec in enumerate(img_delta_vectors) if idx not in nan_indices]
+
+        # テンソルのリストをスタック
+        if txt_delta_vectors and img_delta_vectors:
+            txt_delta_vectors = torch.stack(txt_delta_vectors)
+            img_delta_vectors = torch.stack(img_delta_vectors)
+        else:
+            # 空の場合の代替処理
+            return torch.tensor(0.0, device=device, requires_grad=True)
+
+
+        mma = (txt_delta_vectors @ img_delta_vectors.T)/0.01
+        labels = torch.arange(mma.shape[0], device=mma.device)
+        loss1 = F.cross_entropy(mma, labels)
+        loss2 = F.cross_entropy(mma.T, labels)
+        loss = (loss1 + loss2)/2.0
         
         return loss
 
@@ -228,6 +248,9 @@ def training_loop(num_epoch, batch_size, train_loader, val_loader, model, optimi
                 optimizer.step()
 
             avg_train_loss = sum(temp_loss_list) / len(temp_loss_list)
+            # avg_train_lossがnanの場合知らせる
+            if avg_train_loss != avg_train_loss:
+                raise ValueError("Loss becomes nan")
             loss_list.append(avg_train_loss)
 
             print("Validating...")
@@ -240,6 +263,10 @@ def training_loop(num_epoch, batch_size, train_loader, val_loader, model, optimi
                         loss = criterion(text_features, image_features)
                         val_loss += loss.item()
                 val_loss /= len(val_loader)
+                # val_lossがnanの場合知らせる
+                if val_loss != val_loss:
+                    raise ValueError("Loss becomes nan")
+                
                 val_loss_list.append(val_loss)
 
             log_msg = f"epoch: {epoch+1}, loss: {loss.item():.4f}, val_loss: {val_loss:.4f}\n"
@@ -280,53 +307,113 @@ def main():
     print(f"{config['set']}の実験です")
     num_epoch = config["num_epoch"]
     batch_size = config["batch_size"]
+    if args.test:
+        print('testです')
+        output_dir_name = get_next_folder_name(config["set"] + "_test")
+        model_save_path, log_save_path = define_output_dir(output_dir_name)
 
-    # outputディレクトリの作成とパスの取得
-    output_dir_name = get_next_folder_name(config["set"])
-    model_save_path, log_save_path = define_output_dir(output_dir_name)
+        # log_file_pathの作成
+        log_file_path = os.path.join(log_save_path, "log.txt")
 
-    # log_file_pathの作成
-    log_file_path = os.path.join(log_save_path, "log.txt")
+        # 学習済みモデルのロード
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        model, preprocess = clip.load("ViT-B/32", device=device)
+
+        # データセットの定義
+        train_dataset = CustomDataset("Train_GCC-training.tsv", "train_images", preprocess=preprocess, device=device)
+        val_dataset = CustomDataset("Validation_GCC-1.1.0-Validation.tsv", "val_images", preprocess=preprocess, device=device)
+
+        # テストモードで使用するデータの数
+        num_samples = 1000
+
+        # データセットからランダムにサンプルを選択
+        train_indices = random.sample(range(len(train_dataset)), num_samples)
+        val_indices = random.sample(range(len(val_dataset)), num_samples)
+
+        # サブセットの作成
+        train_subset = Subset(train_dataset, train_indices)
+        val_subset = Subset(val_dataset, val_indices)
+
+        # データローダーの定義
+        train_loader = DataLoader(train_subset, batch_size=batch_size, shuffle=True, collate_fn=custom_collate_fn)
+        val_loader = DataLoader(val_subset, batch_size=batch_size, shuffle=False, collate_fn=custom_collate_fn)
+
+        # 最適化アルゴリズムの定義
+        optimizer = optim.SGD(model.parameters(), lr=float(config["learning_rate"]))
+        
+        # 損失関数の定義
+        if config['loss_function'] == "CrossToTextSimilarityLoss":
+            criterion = CrossToTextSimilarityLoss()
+        elif config['loss_function'] == "ClipLoss":
+            criterion = ClipLoss()
+        elif config['loss_function'] == "CombineLoss":
+            criterion = CombineLoss()
+        elif config['loss_function'] == "DeltaClipLoss":
+            criterion = DeltaClipLoss()
+        else:
+            raise ValueError(f"Invalid loss function: {config['loss_function']}")
+
+        # パラメータ固定
+        if config['freeze_text_params']:
+            # テキストエンコーダの重みを固定
+            freeze_text_params(model)
     
-    # 学習済みモデルのロード
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    model, preprocess = clip.load("ViT-B/32", device=device)
+        # 学習ループ
+        loss_list, val_loss_list = training_loop(num_epoch, batch_size, train_loader, val_loader, model, optimizer, criterion, log_file_path, model_save_path)
 
-    # データローダーの定義
-    train_dataset = CustomDataset("Train_GCC-training.tsv", "train_images", preprocess=preprocess, device=device)
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, collate_fn=custom_collate_fn)
+        # 学習曲線を保存
+        save_training_curve(loss_list, val_loss_list, log_save_path)
 
-    val_dataset = CustomDataset("Validation_GCC-1.1.0-Validation.tsv", "val_images", preprocess=preprocess, device=device)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, collate_fn=custom_collate_fn)
+        # 学習済みモデルの保存
+        save_model(model, model_save_path)
 
-    # 最適化アルゴリズムの定義
-    optimizer = optim.SGD(model.parameters(), lr=float(config["learning_rate"]))
-    
-    # 損失関数の定義
-    if config['loss_function'] == "CrossToTextSimilarityLoss":
-        criterion = CrossToTextSimilarityLoss()
-    elif config['loss_function'] == "ClipLoss":
-        criterion = ClipLoss()
-    elif config['loss_function'] == "CombineLoss":
-        criterion = CombineLoss()
-    elif config['loss_function'] == "DeltaClipLoss":
-        criterion = DeltaLoss()
     else:
-        raise ValueError(f"Invalid loss function: {config['loss_function']}")
+        # outputディレクトリの作成とパスの取得
+        output_dir_name = get_next_folder_name(config["set"])
+        model_save_path, log_save_path = define_output_dir(output_dir_name)
 
-    # パラメータ固定
-    if config['freeze_text_params']:
-        # テキストエンコーダの重みを固定
-        freeze_text_params(model)
-  
-    # 学習ループ
-    loss_list, val_loss_list = training_loop(num_epoch, batch_size, train_loader, val_loader, model, optimizer, criterion, log_file_path, model_save_path)
+        # log_file_pathの作成
+        log_file_path = os.path.join(log_save_path, "log.txt")
+        
+        # 学習済みモデルのロード
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        model, preprocess = clip.load("ViT-B/32", device=device)
 
-    # 学習曲線を保存
-    save_training_curve(loss_list, val_loss_list, log_save_path)
+        # データローダーの定義
+        train_dataset = CustomDataset("Train_GCC-training.tsv", "train_images", preprocess=preprocess, device=device)
+        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, collate_fn=custom_collate_fn)
 
-    # 学習済みモデルの保存
-    save_model(model, model_save_path)
+        val_dataset = CustomDataset("Validation_GCC-1.1.0-Validation.tsv", "val_images", preprocess=preprocess, device=device)
+        val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, collate_fn=custom_collate_fn)
+
+        # 最適化アルゴリズムの定義
+        optimizer = optim.SGD(model.parameters(), lr=float(config["learning_rate"]))
+        
+        # 損失関数の定義
+        if config['loss_function'] == "CrossToTextSimilarityLoss":
+            criterion = CrossToTextSimilarityLoss()
+        elif config['loss_function'] == "ClipLoss":
+            criterion = ClipLoss()
+        elif config['loss_function'] == "CombineLoss":
+            criterion = CombineLoss()
+        elif config['loss_function'] == "DeltaClipLoss":
+            criterion = DeltaLoss()
+        else:
+            raise ValueError(f"Invalid loss function: {config['loss_function']}")
+
+        # パラメータ固定
+        if config['freeze_text_params']:
+            # テキストエンコーダの重みを固定
+            freeze_text_params(model)
+    
+        # 学習ループ
+        loss_list, val_loss_list = training_loop(num_epoch, batch_size, train_loader, val_loader, model, optimizer, criterion, log_file_path, model_save_path)
+
+        # 学習曲線を保存
+        save_training_curve(loss_list, val_loss_list, log_save_path)
+
+        # 学習済みモデルの保存
+        save_model(model, model_save_path)
 
 if __name__ == "__main__":
     main()
