@@ -2,7 +2,7 @@
 # textパラメータの固定
 set: set7
 learning_rate: 0.001
-batch_size: 128
+batch_size: 64
 num_epoch: 5
 loss_function: DeltaClipLoss
 freeze_text_params: True
