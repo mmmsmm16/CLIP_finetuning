@@ -14,6 +14,8 @@ import torch.nn.functional as F
 import random
 # from torchinfo import summary
 
+torch.Tensor.normalize = lambda x: x/x.norm(dim=-1, keepdim=True)
+
 def parse_args():
     parser = argparse.ArgumentParser(description='Finetune CLIP with custom settings')
     parser.add_argument('--set', type=str, required=True, help='name of the Experiment setting')
@@ -99,11 +101,8 @@ class DeltaLoss(nn.Module):
         img_delta_vectors = []
 
         # デルタベクトルの計算
-        txt_delta_vectors = [(txtf[i] - txtf[j]).div((txtf[i] - txtf[j]).norm(2, dim=-1, keepdim=True) + 1e-8) 
-                            for i in range(n) for j in range(n) if i != j]
-        img_delta_vectors = [(imgf[i] - imgf[j]).div((imgf[i] - imgf[j]).norm(2, dim=-1, keepdim=True) + 1e-8) 
-                            for i in range(n) for j in range(n) if i != j]
-
+        txt_delta_vectors = [(txtf[i] - txtf[j]).float().normalize() for i in range(n) for j in range(n) if i != j]
+        img_delta_vectors = [(imgf[i] - imgf[j]).float().normalize() for i in range(n) for j in range(n) if i != j]
         # NaNを含む要素のインデックスを特定
         nan_indices = set()
         for idx, (txt_vec, img_vec) in enumerate(zip(txt_delta_vectors, img_delta_vectors)):
@@ -113,16 +112,11 @@ class DeltaLoss(nn.Module):
         # NaNを含む要素を削除
         txt_delta_vectors = [vec for idx, vec in enumerate(txt_delta_vectors) if idx not in nan_indices]
         img_delta_vectors = [vec for idx, vec in enumerate(img_delta_vectors) if idx not in nan_indices]
-
-        # テンソルのリストをスタック
-        if txt_delta_vectors and img_delta_vectors:
-            txt_delta_vectors = torch.stack(txt_delta_vectors)
-            img_delta_vectors = torch.stack(img_delta_vectors)
-        else:
-            # 空の場合の代替処理
-            return torch.tensor(0.0, device=device, requires_grad=True)
-
-
+        
+        # テンソルのスタック
+        txt_delta_vectors = torch.stack(txt_delta_vectors)
+        img_delta_vectors = torch.stack(img_delta_vectors)
+        
         mma = (txt_delta_vectors @ img_delta_vectors.T)/0.01
         labels = torch.arange(mma.shape[0], device=mma.device)
         loss1 = F.cross_entropy(mma, labels)
